@@ -1,0 +1,1 @@
+• New: Settings → Chat names. Finds chats that show a phone number instead of a name, and updates them to the names WhatsApp has.

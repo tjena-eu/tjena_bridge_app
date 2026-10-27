@@ -1,0 +1,123 @@
+# tjena Bridge release lanes. Run from bridge_app/android/:
+#
+#   bundle install                         # once
+#   bundle exec fastlane build             # binaries + APK -> .build/tjena-bridge.apk
+#                                          # (skip_binaries:true reuses the last native build)
+#   bundle exec fastlane github            # GitHub release v<version> with that APK
+#   bundle exec fastlane release           # build + github
+#   bundle exec fastlane bump              # 0.3.4+17 -> 0.3.5+18 (type:minor|major)
+#
+# Releases on GitHub are what Obtainium (and the website's download button)
+# install from. Obtainium compares the release tag with the installed version
+# name, so every published release needs a new version name: run `bump` first.
+#
+# Needs: GITHUB_TOKEN (fine-grained, "Contents: read and write" on the repo),
+# bridge_app/android/key.properties or TJENA_KEY_PROPERTIES (the release key: never change it, or installed apps
+# can't update). Optional: FLUTTER (flutter binary), ANDROID_HOME, ANDROID_NDK, GO.
+
+APP_NAME     = "tjena Bridge"
+REPO         = "tjena-eu/tjena_bridge"
+ROOT         = File.expand_path("../..", __dir__)   # bridge_app/
+REPO_ROOT    = File.expand_path("..", ROOT)
+PUBSPEC      = File.join(ROOT, "pubspec.yaml")
+CHANGELOGS   = File.join(__dir__, "metadata/android/en-US/changelogs")
+OUT_DIR      = File.join(REPO_ROOT, ".build")
+
+def pubspec_version
+  m = File.read(PUBSPEC).match(/^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$/)
+  UI.user_error!("No 'version: x.y.z+N' line in #{PUBSPEC}") unless m
+  [m[1], m[2].to_i]
+end
+
+# Fixed name (no version): the version is in the release tag.
+def apk_path(_name = nil)
+  File.join(OUT_DIR, "tjena-bridge.apk")
+end
+
+def release_notes(code)
+  [File.join(CHANGELOGS, "#{code}.txt"), File.join(CHANGELOGS, "default.txt")]
+    .find { |f| File.exist?(f) }
+    .then { |f| f ? File.read(f).strip : "" }
+end
+
+# fastlane would overwrite fastlane/README.md (hand-written) after every run.
+ENV["FASTLANE_SKIP_DOCS"] ||= "1"
+ENV["FASTLANE_SKIP_UPDATE_CHECK"] ||= "1"   # Gemfile pins the version (Ruby 3.0)
+
+default_platform(:android)
+
+platform :android do
+  desc "Raise the version name (type: patch|minor|major) and the build number"
+  lane :bump do |options|
+    name, code = pubspec_version
+    major, minor, patch = name.split(".").map(&:to_i)
+    case (options[:type] || "patch").to_s
+    when "major" then major, minor, patch = major + 1, 0, 0
+    when "minor" then minor, patch = minor + 1, 0
+    else patch += 1
+    end
+    new_version = "#{major}.#{minor}.#{patch}+#{code + 1}"
+    File.write(PUBSPEC, File.read(PUBSPEC).sub(/^version:.*$/, "version: #{new_version}"))
+    UI.success("pubspec.yaml: #{name}+#{code} -> #{new_version}")
+    UI.important("Add release notes: #{File.join(CHANGELOGS, "#{code + 1}.txt")}")
+  end
+
+  desc "Build the native binaries (bridge, relay, calls) and the release APK into .build/"
+  lane :build do |options|
+    name, code = pubspec_version
+    key = ENV["TJENA_KEY_PROPERTIES"] || File.join(ROOT, "android/key.properties")
+    UI.user_error!("#{key} missing: release builds must be signed with the release key") unless File.exist?(key)
+    flutter = ENV["FLUTTER"] || File.expand_path("~/flutter/bin/flutter")
+    ENV["ANDROID_HOME"] ||= File.expand_path("~/android-sdk")
+    ENV["ANDROID_SDK_ROOT"] ||= ENV["ANDROID_HOME"]
+    unless options[:skip_binaries]
+      # Unmodified mautrix-whatsapp + our relay and calls daemon, into jniLibs.
+      ENV["PATH"] = "#{ENV["PATH"]}:#{File.expand_path("~/go/bin")}"
+      sh("bash", File.join(REPO_ROOT, "android-binary/build.sh"))
+    end
+    Dir.chdir(ROOT) do
+      FileUtils.rm_f("android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java")
+      # The bridge binaries are arm64-only.
+      sh(flutter, "build", "apk", "--release", "--target-platform", "android-arm64")
+    end
+    FileUtils.mkdir_p(OUT_DIR)
+    FileUtils.cp(File.join(ROOT, "build/app/outputs/flutter-apk/app-release.apk"), apk_path(name))
+    UI.success("#{apk_path(name)} (#{name}+#{code})")
+  end
+
+  desc "Publish .build/<apk> as GitHub release v<version> (draft:true to review first)"
+  lane :github do |options|
+    name, code = pubspec_version
+    tag = "v#{name}"
+    apk = apk_path(name)
+    token = ENV["GITHUB_TOKEN"]
+    UI.user_error!("Set GITHUB_TOKEN") if token.to_s.empty?
+    UI.user_error!("#{apk} missing: run `fastlane build` first") unless File.exist?(apk)
+    if get_github_release(url: REPO, version: tag, api_token: token)
+      UI.user_error!("Release #{tag} already exists. Run `fastlane bump` for a new version.")
+    end
+    commit = Dir.chdir(REPO_ROOT) { sh("git", "rev-parse", "HEAD", log: false).strip }
+    pushed = Dir.chdir(REPO_ROOT) { sh("git", "branch", "-r", "--contains", commit, log: false).strip }
+    UI.user_error!("Commit #{commit[0, 9]} isn't pushed yet; push it first.") if pushed.empty?
+    notes = release_notes(code)
+    UI.important("No changelog #{code}.txt; the release has no notes.") if notes.empty?
+    github_release(
+      repository_name: REPO,
+      api_token: token,
+      name: "#{APP_NAME} #{name}",
+      tag_name: tag,
+      commitish: commit,
+      description: notes,
+      upload_assets: [apk],
+      is_draft: options[:draft] == true || options[:draft].to_s == "true",
+      is_prerelease: false,
+    )
+    UI.success("Published #{tag}: https://github.com/#{REPO}/releases/tag/#{tag}")
+  end
+
+  desc "build + github"
+  lane :release do |options|
+    build(options)
+    github(options)
+  end
+end

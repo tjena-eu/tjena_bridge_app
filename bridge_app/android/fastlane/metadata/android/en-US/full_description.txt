@@ -1,0 +1,19 @@
+<b>Your own WhatsApp bridge, at home</b>
+
+tjena Bridge runs the open-source mautrix-whatsapp bridge on a spare Android phone that stays at home. Your WhatsApp messages are decrypted only on that phone and on your tjena!chat devices; the tjena server only passes encrypted data along.
+
+<b>Features</b>
+
+• Link one or more WhatsApp accounts with a pairing code
+• Copies your recent chat history into tjena!chat
+• WhatsApp voice and video calls from tjena!chat
+• Encrypted backup of the bridge, to move to a new phone
+• Diagnostics: history import, encryption keys, chat names
+
+<b>You need</b>
+
+A spare Android phone (Android 10 or newer, 64-bit) on Wi-Fi and a charger, and a tjena!chat account.
+
+WhatsApp doesn't officially allow third-party clients. The bridge connects as a linked device; use it at your own risk.
+
+Source code: https://github.com/tjena-eu/tjena_bridge

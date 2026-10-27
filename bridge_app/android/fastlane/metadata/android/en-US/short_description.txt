@@ -1,0 +1,1 @@
+Your own WhatsApp bridge for tjena!chat, on a spare phone at home.
