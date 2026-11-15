@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'native.dart';
 import 'screens/backup_screen.dart';
@@ -10,7 +12,19 @@ import 'screens/setup_screen.dart';
 import 'screens/status_screen.dart';
 import 'screens/whatsapp_screen.dart';
 
-void main() => runApp(const BridgeApp());
+void main() {
+  LicenseRegistry.addLicense(_licenses);
+  runApp(const BridgeApp());
+}
+
+/// tjena Bridge is AGPL-3.0-or-later like tjena itself; the bundled programs
+/// are listed with their licences (Settings → About & licences).
+Stream<LicenseEntry> _licenses() async* {
+  Future<String> asset(String name) => rootBundle.loadString('assets/licenses/$name');
+  yield LicenseEntryWithLineBreaks(['tjena Bridge'], await asset('AGPL-3.0.txt'));
+  yield LicenseEntryWithLineBreaks(['tjena Bridge: bundled programs'], await asset('bundled.txt'));
+  yield LicenseEntryWithLineBreaks(['wacall'], await asset('wacall-THIRD_PARTY.md'));
+}
 
 const tjenaBlue = Color(0xFF295D9F);
 

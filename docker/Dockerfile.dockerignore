@@ -1,0 +1,8 @@
+# Build context is the repo root; only relay/, wacall/, docker/manager/ and LICENSE are needed.
+*
+!LICENSE
+!relay/
+!wacall/
+!docker/manager/
+wacall/wacall
+**/*_test.go.orig

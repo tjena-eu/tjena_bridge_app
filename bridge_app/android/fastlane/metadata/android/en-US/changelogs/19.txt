@@ -1,0 +1,3 @@
+- History import: one tab per WhatsApp account
+- Copy history: "Copy missing messages" now copies only chats that stopped early (not every held-back chat)
+- New: "Copy held-back chats", "Choose chats…" and "Stop copying"

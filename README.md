@@ -14,6 +14,7 @@ The server side (bridge gateway at wap.tjena.eu) is in [tjena_proxy](https://git
   in [Obtainium](https://github.com/ImranR98/Obtainium), or open
   `obtainium://add/https://github.com/tjena-eu/tjena_bridge` on the phone.
 - **APK:** [latest release](https://github.com/tjena-eu/tjena_bridge/releases/latest).
+- **Docker (home server instead of a phone):** `ghcr.io/tjena-eu/tjena-bridge`, web UI on port 8080; see [docker/README.md](docker/README.md)
 - Setup: [docs/user-guide.md](docs/user-guide.md) · website: <https://tjena.eu/download/>
 
 Signing certificate SHA-256 (same key as tjena!chat):
@@ -26,6 +27,7 @@ Signing certificate SHA-256 (same key as tjena!chat):
 | `bridge_app/` | The tjena Bridge Android app (Flutter + Kotlin service) |
 | `relay/` | Runs on the phone next to the bridge: forwards to the gateway, config generation, diagnostics (`history-info`, `names-info`, …) |
 | `wacall/` | WhatsApp calls daemon (one calls device per WhatsApp account) |
+| `docker/` | The bridge in Docker with a web UI instead of a phone: [docker/README.md](docker/README.md) |
 | `android-binary/` | Builds mautrix-whatsapp (pinned tag, unmodified), relay and wacall for android/arm64 into the app's `jniLibs` |
 | `itest/` | Full-stack test against a throwaway Synapse (`itest/run.sh`; needs tjena_proxy checked out next to this repo, or `GATEWAY_DIR`) |
 | `docs/` | User guide, design notes, tests and to-dos |

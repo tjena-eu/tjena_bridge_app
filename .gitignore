@@ -10,7 +10,14 @@ itest/.work/
 .build/
 # fastlane / bundler
 .bundle/
-vendor/bundle/
+**/vendor/bundle/
 **/fastlane/report.xml
 wacall/wacall
 **/fastlane/test_output/
+
+# signing and local machine files (never commit)
+**/key.properties
+*.jks
+*.keystore
+**/local.properties
+.env

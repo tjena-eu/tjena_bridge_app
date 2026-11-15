@@ -1,0 +1,23 @@
+tjena Bridge runs three programs on this phone. All of them are free software
+under licences that allow use and redistribution in an AGPL-3.0 program.
+
+mautrix-whatsapp (the bridge), unmodified upstream release
+  AGPL-3.0-or-later, (c) Tulir Asokan and contributors
+  Source: https://github.com/mautrix/whatsapp
+  Main libraries: maunium.net/go/mautrix (MPL-2.0), go.mau.fi/whatsmeow
+  (MPL-2.0), go.mau.fi/libsignal (GPL-3.0), go.mau.fi/util (MPL-2.0),
+  mattn/go-sqlite3 (MIT; SQLite is public domain).
+
+relay (tjena's connection between the bridge and the tjena server)
+  AGPL-3.0-or-later, part of tjena.
+  Libraries: maunium.net/go/mautrix (MPL-2.0), go.mau.fi/libsignal (GPL-3.0),
+  coder/websocket (ISC), mattn/go-sqlite3 (MIT), gopkg.in/yaml.v3 (MIT and
+  Apache-2.0), golang.org/x/* (BSD-3-Clause), rs/zerolog, tidwall/*,
+  mattn/go-colorable, mattn/go-isatty (MIT), yuin/goldmark (MIT),
+  filippo.io/edwards25519 (BSD-3-Clause).
+
+wacall (WhatsApp calls), see the separate wacall entry.
+
+The source code of tjena Bridge, the relay and wacall is available under the
+GNU Affero General Public License, version 3 or later. If you got this app
+from someone, you may ask them for the source code.

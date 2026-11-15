@@ -6,8 +6,9 @@ import 'package:flutter/services.dart';
 class Native {
   static const _ch = MethodChannel('eu.tjena.bridge/native');
 
-  static Future<BridgeState> state() async =>
-      BridgeState(jsonDecode(await _ch.invokeMethod<String>('getState') ?? '{}'));
+  static Future<BridgeState> state() async => BridgeState(
+    jsonDecode(await _ch.invokeMethod<String>('getState') ?? '{}'),
+  );
 
   static Future<Map<String, dynamic>?> session() async {
     final s = await _ch.invokeMethod<String>('getSession');
@@ -18,12 +19,11 @@ class Native {
     required Map<String, dynamic> bundle,
     required Map<String, dynamic> session,
     required String gateway,
-  }) =>
-      _ch.invokeMethod('saveSetup', {
-        'bundle': jsonEncode(bundle),
-        'session': jsonEncode(session),
-        'gateway': gateway,
-      });
+  }) => _ch.invokeMethod('saveSetup', {
+    'bundle': jsonEncode(bundle),
+    'session': jsonEncode(session),
+    'gateway': gateway,
+  });
 
   static Future<void> updateBundle(Map<String, dynamic> bundle) =>
       _ch.invokeMethod('updateBundle', {'bundle': jsonEncode(bundle)});
@@ -66,15 +66,18 @@ class Native {
     return RelayResponse(m['status'] as int? ?? 0, m['body'] as String? ?? '');
   }
 
-  static Future<void> setCallsEnabled(bool on) => _ch.invokeMethod('setCallsEnabled', {'on': on});
+  static Future<void> setCallsEnabled(bool on) =>
+      _ch.invokeMethod('setCallsEnabled', {'on': on});
 
   static Future<void> setExtraUsers(List<String> users) =>
       _ch.invokeMethod('setExtraUsers', {'users': users});
 
-  static Future<void> setGatewayUrl(String url) => _ch.invokeMethod('setGatewayUrl', {'url': url});
+  static Future<void> setGatewayUrl(String url) =>
+      _ch.invokeMethod('setGatewayUrl', {'url': url});
 
   static Future<Map<String, dynamic>> options() async =>
-      jsonDecode(await _ch.invokeMethod<String>('getOptions') ?? '{}') as Map<String, dynamic>;
+      jsonDecode(await _ch.invokeMethod<String>('getOptions') ?? '{}')
+          as Map<String, dynamic>;
 
   /// Saves bridge options and restarts the bridge if it runs.
   static Future<void> setOptions(Map<String, dynamic> options) =>
@@ -82,50 +85,138 @@ class Native {
 
   /// Keys and trust as stored in the bridge's own database (read-only).
   static Future<Map<String, dynamic>> securityInfo() async =>
-      jsonDecode(await _ch.invokeMethod<String>('securityInfo') ?? '{}') as Map<String, dynamic>;
+      jsonDecode(await _ch.invokeMethod<String>('securityInfo') ?? '{}')
+          as Map<String, dynamic>;
 
   /// History import progress and problems (read-only).
   static Future<Map<String, dynamic>> historyInfo() async =>
-      jsonDecode(await _ch.invokeMethod<String>('historyInfo') ?? '{}') as Map<String, dynamic>;
+      jsonDecode(await _ch.invokeMethod<String>('historyInfo') ?? '{}')
+          as Map<String, dynamic>;
 
   /// Stops the bridge, marks chats whose history import stopped early, and
   /// starts it again so it copies the rest. Returns {chats, stored}.
   /// Fast history import: 'pause' / 'resume' double puppeting (restarts the
   /// bridge) or 'status' ({paused, import_done, pending, ...}).
   static Future<Map<String, dynamic>> doublePuppet(String action) async =>
-      jsonDecode(await _ch.invokeMethod<String>('doublePuppet', {'action': action}) ?? '{}') as Map<String, dynamic>;
+      jsonDecode(
+            await _ch.invokeMethod<String>('doublePuppet', {
+                  'action': action,
+                }) ??
+                '{}',
+          )
+          as Map<String, dynamic>;
 
   /// Contact/chat names that differ from what the bridge's contact store says.
   static Future<Map<String, dynamic>> namesInfo() async =>
-      jsonDecode(await _ch.invokeMethod<String>('namesInfo') ?? '{}') as Map<String, dynamic>;
+      jsonDecode(await _ch.invokeMethod<String>('namesInfo') ?? '{}')
+          as Map<String, dynamic>;
 
   /// Applies the fixable names. Stops and restarts the bridge.
   static Future<Map<String, dynamic>> namesFix() async =>
-      jsonDecode(await _ch.invokeMethod<String>('namesFix') ?? '{}') as Map<String, dynamic>;
+      jsonDecode(await _ch.invokeMethod<String>('namesFix') ?? '{}')
+          as Map<String, dynamic>;
 
-  static Future<Map<String, dynamic>> historyCatchup() async =>
-      jsonDecode(await _ch.invokeMethod<String>('historyCatchup') ?? '{}') as Map<String, dynamic>;
+  /// Copies stored history into tjena: [mode] "missing" (chats that stopped
+  /// early), "held" (chats without a room yet) or "both"; [chats] (WhatsApp
+  /// chat ids) overrides it; [login] limits it to one account. Restarts the bridge.
+  static Future<Map<String, dynamic>> historyCatchup({
+    String? mode,
+    String? login,
+    List<String>? chats,
+  }) async =>
+      jsonDecode(
+            await _ch.invokeMethod<String>('historyCatchup', {
+                  'mode': mode,
+                  'login': login,
+                  'chats': chats,
+                }) ??
+                '{}',
+          )
+          as Map<String, dynamic>;
 
-  static Future<void> setNotificationPrefs({required String style, required bool alerts}) =>
-      _ch.invokeMethod('setNotificationPrefs', {'style': style, 'alerts': alerts});
+  /// Stops creating and filling chats from history. Restarts the bridge.
+  static Future<Map<String, dynamic>> historyStop() async =>
+      jsonDecode(await _ch.invokeMethod<String>('historyStop') ?? '{}')
+          as Map<String, dynamic>;
+
+  static Future<void> setNotificationPrefs({
+    required String style,
+    required bool alerts,
+  }) => _ch.invokeMethod('setNotificationPrefs', {
+    'style': style,
+    'alerts': alerts,
+  });
 
   /// Opens Android's settings for one notification channel (or the whole app).
   static Future<void> openNotificationSettings([String? channel]) =>
       _ch.invokeMethod('openNotificationSettings', {'channel': channel});
 
-  static Future<void> requestBatteryExemption() => _ch.invokeMethod('requestBatteryExemption');
+  static Future<void> requestBatteryExemption() =>
+      _ch.invokeMethod('requestBatteryExemption');
 
-  static Future<String> recentLog() async => await _ch.invokeMethod<String>('recentLog') ?? '';
+  static Future<String> recentLog() async =>
+      await _ch.invokeMethod<String>('recentLog') ?? '';
 
-  static Future<String> exportLogs() async => await _ch.invokeMethod<String>('exportLogs') ?? '';
+  static Future<String> exportLogs() async =>
+      await _ch.invokeMethod<String>('exportLogs') ?? '';
 
   static Future<bool> exportBackup(String passphrase) async =>
-      await _ch.invokeMethod<bool>('exportBackup', {'passphrase': passphrase}) ?? false;
+      await _ch.invokeMethod<bool>('exportBackup', {
+        'passphrase': passphrase,
+      }) ??
+      false;
 
   static Future<bool> importBackup(String passphrase) async =>
-      await _ch.invokeMethod<bool>('importBackup', {'passphrase': passphrase}) ?? false;
+      await _ch.invokeMethod<bool>('importBackup', {
+        'passphrase': passphrase,
+      }) ??
+      false;
 
   static Future<void> wipe() => _ch.invokeMethod('wipe');
+
+  // Moving to a new phone (screens/move_screen.dart).
+  static Future<String> moveToken() async =>
+      await _ch.invokeMethod<String>('moveToken') ?? '';
+
+  /// Stops the bridge and writes the encrypted transfer file; returns its path.
+  static Future<String> moveExport(String key) async =>
+      await _ch.invokeMethod<String>('moveExport', {'key': key}) ?? '';
+
+  static Future<String> moveInPath() async =>
+      await _ch.invokeMethod<String>('moveInPath') ?? '';
+
+  /// Replaces this phone's bridge with the received one (deletes the file).
+  static Future<void> moveImport(String path, String key) =>
+      _ch.invokeMethod('moveImport', {'path': path, 'key': key});
+
+  static Future<void> moveCleanup() => _ch.invokeMethod('moveCleanup');
+
+  // Moving without a camera: a key exchange, then both devices show a number.
+  static Future<({String pub, String commit})> moveKexStart() async {
+    final m = (await _ch.invokeMapMethod<String, String>('moveKexStart'))!;
+    return (pub: m['pub']!, commit: m['commit']!);
+  }
+
+  static Future<({String key, String code})> moveKexDerive({
+    required String peer,
+    required bool oldSide,
+    String? commit,
+  }) async {
+    final m = (await _ch.invokeMapMethod<String, String>(
+        'moveKexDerive', {'peer': peer, 'oldSide': oldSide, 'commit': ?commit}))!;
+    return (key: m['key']!, code: m['code']!);
+  }
+
+  static const proofHello = 'tjena-bridge move hello';
+  static const proofImported = 'tjena-bridge move imported';
+
+  static Future<String> moveProof(String key, String label) async =>
+      await _ch.invokeMethod<String>('moveProof', {'key': key, 'label': label}) ?? '';
+
+  static Future<bool> moveCheckProof(String key, String label, String? proof) async =>
+      await _ch.invokeMethod<bool>('moveCheckProof', {'key': key, 'label': label, 'proof': proof}) ?? false;
+
+  static Future<bool> hasCamera() async => await _ch.invokeMethod<bool>('hasCamera') ?? true;
 }
 
 class RelayResponse {
@@ -167,19 +258,25 @@ class BridgeState {
   String get owner => raw['owner'] as String? ?? '';
   String get slot => raw['slot'] as String? ?? '';
   String get botMxid => raw['bot_mxid'] as String? ?? '';
-  String get gatewayUrl => raw['gateway_url'] as String? ?? 'https://wap.tjena.eu';
+  String get gatewayUrl =>
+      raw['gateway_url'] as String? ?? 'https://wap.tjena.eu';
   String? get homeserver => raw['homeserver'] as String?;
-  List<String> get extraUsers => (raw['extra_users'] as List?)?.cast<String>() ?? [];
+  List<String> get extraUsers =>
+      (raw['extra_users'] as List?)?.cast<String>() ?? [];
   String get notifStyle => raw['notif_style'] as String? ?? 'normal';
   bool get notifAlerts => raw['notif_alerts'] != false;
 
-  Map<String, dynamic> get relay => (raw['relay'] as Map?)?.cast<String, dynamic>() ?? {};
+  Map<String, dynamic> get relay =>
+      (raw['relay'] as Map?)?.cast<String, dynamic>() ?? {};
   bool get bridgeConnected => relay['bridge_connected'] == true;
   bool get upstreamConnected => relay['upstream_connected'] == true;
   bool get revoked => relay['revoked'] == true;
   String? get upstreamError => relay['upstream_error'] as String?;
-  DateTime? get lastEvent => DateTime.tryParse(relay['last_event'] as String? ?? '');
+  DateTime? get lastEvent =>
+      DateTime.tryParse(relay['last_event'] as String? ?? '');
+
   /// Send pacing in the relay: rate_limit_hits, rate_limit_retried,
   /// rate_limit_handed_back, sends_waiting, last_rate_limit.
-  Map<String, dynamic> get pace => (relay['pace'] as Map?)?.cast<String, dynamic>() ?? {};
+  Map<String, dynamic> get pace =>
+      (relay['pace'] as Map?)?.cast<String, dynamic>() ?? {};
 }

@@ -448,6 +448,22 @@ func main() {
 		}
 		return
 	}
+	// Subcommand: unblock the history queue before a bridge start.
+	if len(os.Args) > 1 && os.Args[1] == "history-settle" {
+		if err := runHistorySettle(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "history-settle:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	// Subcommand: stop creating/filling chats from history (bridge stopped).
+	if len(os.Args) > 1 && os.Args[1] == "history-stop" {
+		if err := runHistoryStop(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "history-stop:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	// Subcommand: pause/resume double puppeting for a fast history import (bridge stopped).
 	if len(os.Args) > 1 && os.Args[1] == "double-puppet" {
 		if err := runDoublePuppet(os.Args[2:]); err != nil {

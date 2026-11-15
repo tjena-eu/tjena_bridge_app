@@ -336,6 +336,10 @@ func generateBridgeConfig(example []byte, b Bundle, s Settings) ([]byte, error) 
 		return nil, err
 	}
 	edits = append(edits, optEdits...)
+	if catchupActive(s.DataDir) {
+		// A catch-up chose exactly which chats to create: create all of them.
+		edits = append(edits, configEdit{-1, []string{"network", "history_sync", "max_initial_conversations"}})
+	}
 	for _, e := range edits {
 		if err := set(root, e.value, e.keys...); err != nil {
 			return nil, fmt.Errorf("set %s: %w", strings.Join(e.keys, "."), err)

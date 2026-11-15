@@ -21,6 +21,7 @@ class MainActivity : FlutterActivity() {
     private val main = Handler(Looper.getMainLooper())
     private var pendingBackup: Pair<ByteArray, MethodChannel.Result>? = null
     private var pendingImport: Pair<String, MethodChannel.Result>? = null
+    private var moveKeys: MoveKex.Keys? = null // moving without a camera
 
     private val mxidRe = Regex("^@[a-z0-9._=/+-]+:[a-zA-Z0-9.-]+(:\\d+)?$")
 
@@ -171,10 +172,23 @@ class MainActivity : FlutterActivity() {
                 }
             }
             "historyCatchup" -> bg(result) {
+                val mode = call.argument<String>("mode")
+                require(mode == null || mode in listOf("missing", "held", "both")) { "invalid mode" }
+                val login = call.argument<String>("login")
+                val chats = call.argument<List<String>>("chats")
                 val wasOn = prefs.getBoolean("enabled", false)
                 stopAndWait()
                 try {
-                    rt.historyCatchup()
+                    rt.historyCatchup(mode, login, chats)
+                } finally {
+                    if (wasOn) BridgeService.start(this)
+                }
+            }
+            "historyStop" -> bg(result) {
+                val wasOn = prefs.getBoolean("enabled", false)
+                stopAndWait()
+                try {
+                    rt.historyStop()
                 } finally {
                     if (wasOn) BridgeService.start(this)
                 }
@@ -256,6 +270,61 @@ class MainActivity : FlutterActivity() {
                     REQ_IMPORT
                 )
             }
+            // Moving to a new phone (screens/move_screen.dart). The bridge's
+            // own token authenticates the old phone at the gateway.
+            "moveToken" -> bg(result) {
+                rt.secrets.load().getJSONObject("bundle").getString("as_token")
+            }
+            // Old phone: stop the bridge (it stays stopped; the app starts it
+            // again if the move fails) and write the encrypted transfer file.
+            "moveExport" -> bg(result) {
+                val key = moveKey(call)
+                stopAndWait()
+                val out = File(cacheDir, "move-out.tjmv")
+                out.writeBytes(Backup.exportForMove(rt, key))
+                out.path
+            }
+            // New phone: replace this phone's (empty) bridge with the received one.
+            "moveImport" -> bg(result) {
+                val key = moveKey(call)
+                val f = File(call.argument<String>("path")!!)
+                require(f.canonicalPath.startsWith(cacheDir.canonicalPath)) { "bad path" }
+                try {
+                    stopAndWait()
+                    Backup.importFromMove(rt, f.readBytes(), key)
+                } finally {
+                    f.delete()
+                }
+                true
+            }
+            // Moving without a camera (MoveKex.kt): our key pair for this move.
+            "moveKexStart" -> bg(result) {
+                val k = MoveKex.generate().also { moveKeys = it }
+                mapOf("pub" to MoveKex.b64(k.pub), "commit" to MoveKex.commit(k.pub))
+            }
+            // The other device's key: the transfer key and the number to compare.
+            // The old phone passes the new one's earlier commitment.
+            "moveKexDerive" -> bg(result) {
+                val k = moveKeys ?: throw IllegalStateException("no key exchange running")
+                val peer = MoveKex.unb64(call.argument<String>("peer")!!)
+                call.argument<String>("commit")?.let {
+                    require(MoveKex.commit(peer) == it) { "The key check failed, so nothing was sent. Try again." }
+                }
+                val r = MoveKex.derive(k, peer, call.argument<Boolean>("oldSide") == true)
+                moveKeys = null
+                mapOf("key" to MoveKex.b64(r.key), "code" to r.code)
+            }
+            "moveProof" -> result.success(MoveKex.proof(moveKey(call), call.argument<String>("label")!!))
+            "moveCheckProof" -> result.success(
+                MoveKex.checkProof(moveKey(call), call.argument<String>("label")!!, call.argument<String>("proof") ?: "")
+            )
+            "hasCamera" -> result.success(packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY))
+            "moveInPath" -> result.success(File(cacheDir, "move-in.tjmv").path)
+            "moveCleanup" -> bg(result) {
+                File(cacheDir, "move-out.tjmv").delete()
+                File(cacheDir, "move-in.tjmv").delete()
+                true
+            }
             "wipe" -> bg(result) {
                 prefs.edit().putBoolean("enabled", false).apply()
                 stopAndWait()
@@ -265,6 +334,12 @@ class MainActivity : FlutterActivity() {
             else -> result.notImplemented()
         }
     }
+
+    private fun moveKey(call: MethodCall): ByteArray =
+        android.util.Base64.decode(
+            call.argument<String>("key")!!,
+            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING,
+        )
 
     private fun stopAndWait() {
         BridgeService.stop(this)

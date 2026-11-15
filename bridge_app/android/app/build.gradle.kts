@@ -77,3 +77,8 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // JVM unit tests (src/test): crypto that must match docker/manager.
+    testImplementation("junit:junit:4.12")
+}

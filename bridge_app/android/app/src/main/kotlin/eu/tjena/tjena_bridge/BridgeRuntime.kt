@@ -83,6 +83,13 @@ class BridgeRuntime(val context: Context) {
             exampleVersion.writeText(version)
         }
 
+        // Chats whose room creation keeps failing would stay first in the
+        // bridge's history queue and hold up the others (relay history-settle).
+        try {
+            runCapture(listOf(relayBin.path, "history-settle", bridgeDb.path, logDir.path), 30)
+        } catch (_: Exception) {
+        }
+
         val port = freePort()
         val bundleFile = File(runDir, "bundle.json")
         val settingsFile = File(runDir, "settings.json")
@@ -201,14 +208,29 @@ class BridgeRuntime(val context: Context) {
         return out
     }
 
-    /** Lets the bridge finish history imports that stopped early. Bridge must be stopped. */
-    fun historyCatchup(): String {
-        val p = ProcessBuilder(listOf(relayBin.path, "history-catchup", bridgeDb.path))
-            .directory(dataDir).redirectErrorStream(false).start()
+    /**
+     * Copies stored history into tjena (relay history-catchup). Bridge must be stopped.
+     * [mode]: "missing" (chats that stopped early), "held" (chats without a room yet)
+     * or "both"; [chats] (WhatsApp chat ids) overrides it. [login]: one account only.
+     */
+    fun historyCatchup(mode: String?, login: String?, chats: List<String>?): String {
+        val args = mutableListOf(relayBin.path, "history-catchup", bridgeDb.path)
+        if (!mode.isNullOrEmpty()) args += listOf("--mode", mode)
+        if (!login.isNullOrEmpty()) args += listOf("--login", login)
+        if (!chats.isNullOrEmpty()) args += listOf("--chats", chats.joinToString(","))
+        return runRelayJson(args, "history-catchup")
+    }
+
+    /** Stops creating/filling chats from history (relay history-stop). Bridge must be stopped. */
+    fun historyStop(): String =
+        runRelayJson(listOf(relayBin.path, "history-stop", bridgeDb.path), "history-stop")
+
+    private fun runRelayJson(args: List<String>, what: String): String {
+        val p = ProcessBuilder(args).directory(dataDir).redirectErrorStream(false).start()
         val out = p.inputStream.bufferedReader().readText()
         val err = p.errorStream.bufferedReader().readText()
         if (!p.waitFor(60, TimeUnit.SECONDS)) p.destroyForcibly()
-        if (p.exitValue() != 0) throw IllegalStateException(err.trim().ifEmpty { "history-catchup failed" })
+        if (p.exitValue() != 0) throw IllegalStateException(err.trim().ifEmpty { "$what failed" })
         return out
     }
 

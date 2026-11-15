@@ -1,0 +1,40 @@
+# tjena Bridge (Docker). Copy this file to your server and run
+#
+#   docker compose up -d
+#
+# then open http://<server-ip>:8080 from your home network and choose the
+# web UI password. To build from source instead (from the repo root):
+#
+#   docker compose -f docker/compose.yaml -f docker/compose.build.yaml up -d --build
+#
+# See docker/README.md.
+services:
+  tjena-bridge:
+    image: ghcr.io/tjena-eu/tjena-bridge:latest
+    container_name: tjena-bridge
+    restart: unless-stopped
+    ports:
+      # Reachable from your home network. The web UI only answers devices on
+      # private networks (home LAN, VPNs like Tailscale): see WEBUI_ALLOW.
+      # Don't forward this port on your router.
+      - "8080:8080"
+    environment:
+      TZ: Europe/Berlin
+      # Optional: fixed web UI password instead of choosing one on first visit.
+      # WEBUI_PASSWORD: change-me-to-something-long
+      # Optional: who may open the web UI (private | any | CIDR list).
+      # WEBUI_ALLOW: private
+    volumes:
+      # Bridge database, keys and tokens. Back it up, and keep it private.
+      - tjena-bridge-data:/data
+    tmpfs:
+      # Generated configs (with tokens) live here for ~15 s after each start.
+      - /tmp:mode=1777,size=64m
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  tjena-bridge-data:

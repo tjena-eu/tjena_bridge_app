@@ -50,6 +50,9 @@ type HistoryLogin struct {
 	NotCopied          int           `json:"not_copied"`          // stored, but the chat's room exists
 	Fillable           int           `json:"fillable"`            // ... and newer than the room's newest message
 	BlockedChats       int           `json:"blocked_chats"`       // chats with not-copied history all older than the room's newest message
+	FixableChats       int           `json:"fixable_chats"`       // chats in state "fixable"
+	UnfixableChats     int           `json:"unfixable_chats"`     // chats in state "unfixable"
+	UnfixableMessages  int           `json:"unfixable_messages"`  // stored messages of those chats
 	Rooms              int           `json:"rooms"`
 	BridgedMessages    int           `json:"bridged_messages"`
 	Chats              []HistoryChat `json:"chats"`
@@ -67,6 +70,35 @@ type HistoryChat struct {
 	LastMsgTS  int64  `json:"last_msg_ts"` // newest message on the phone, unix seconds
 	RoomNewest int64  `json:"room_newest"` // newest message in the room, unix seconds
 	Fillable   int    `json:"fillable"`    // stored messages newer than RoomNewest (catch-up can add these)
+	// CreateFailed: how often the bridge failed to create this chat's room (log).
+	CreateFailed int `json:"create_failed"`
+	// State: "ok", "fixable" (catch-up can still add messages), "unfixable"
+	// (nothing more can be added, see Reason), "held" (no room yet, waiting)
+	// or "" (nothing stored, no room).
+	State string `json:"state"`
+	// Reason for "unfixable": "newer_messages" (the missing ones would land
+	// before newer messages already in the chat) or "create_failed" (the
+	// bridge keeps failing to create the chat; it no longer holds up others).
+	Reason string `json:"reason,omitempty"`
+}
+
+// createFailLimit: after this many failed attempts to create a chat's room,
+// the chat counts as unfixable and history-settle takes it out of the queue.
+const createFailLimit = 2
+
+func (c *HistoryChat) classify() {
+	switch {
+	case c.HasRoom && c.Stored > 0 && c.Fillable > 0:
+		c.State = "fixable"
+	case c.HasRoom && c.Stored > 0:
+		c.State, c.Reason = "unfixable", "newer_messages"
+	case c.HasRoom:
+		c.State = "ok"
+	case c.CreateFailed >= createFailLimit:
+		c.State, c.Reason = "unfixable", "create_failed"
+	case c.Stored > 0:
+		c.State = "held"
+	}
 }
 
 type HistoryChunk struct {
@@ -98,6 +130,7 @@ type HistoryLog struct {
 	perPortalSent     map[string]int
 	perPortalFailed   map[string]bool
 	perPortalRateLimt map[string]bool
+	perChatCreateFail map[string]int
 }
 
 type LogProblem struct {
@@ -256,19 +289,39 @@ func historyInfo(dbPath, logDir string) (*HistoryInfo, error) {
 			c.Backfilled = info.Log.perPortalSent[jid]
 			c.Failed = info.Log.perPortalFailed[jid]
 			c.RateLimit = info.Log.perPortalRateLimt[jid]
+			c.CreateFailed = info.Log.perChatCreateFail[jid]
+			c.classify()
+			switch c.State {
+			case "fixable":
+				l.FixableChats++
+			case "unfixable":
+				l.UnfixableChats++
+				l.UnfixableMessages += c.Stored
+			}
 			l.Chats = append(l.Chats, *c)
 		}
 		// Problems first, then newest.
 		sort.Slice(l.Chats, func(a, b int) bool {
 			ca, cb := l.Chats[a], l.Chats[b]
-			pa, pb := ca.Failed || (ca.HasRoom && ca.Stored > 0), cb.Failed || (cb.HasRoom && cb.Stored > 0)
-			if pa != pb {
-				return pa
+			rank := func(c HistoryChat) int {
+				switch {
+				case c.State == "fixable":
+					return 0
+				case c.State == "unfixable":
+					return 1
+				case c.Failed:
+					return 2
+				}
+				return 3
+			}
+			if ra, rb := rank(ca), rank(cb); ra != rb {
+				return ra < rb
 			}
 			return ca.LastMsgTS > cb.LastMsgTS
 		})
-		if len(l.Chats) > 300 {
-			l.Chats = l.Chats[:300]
+		// Enough for choosing chats to copy; keeps the JSON small.
+		if len(l.Chats) > 1500 {
+			l.Chats = l.Chats[:1500]
 		}
 	}
 	return info, nil
@@ -280,6 +333,7 @@ func readHistoryLog(dir string, since time.Time) HistoryLog {
 	out := HistoryLog{
 		Chunks: []HistoryChunk{}, Progress: map[string]int{}, RecentErrors: []LogProblem{},
 		perPortalSent: map[string]int{}, perPortalFailed: map[string]bool{}, perPortalRateLimt: map[string]bool{},
+		perChatCreateFail: map[string]int{},
 	}
 	files, _ := filepath.Glob(filepath.Join(dir, "bridge*.log"))
 	sort.Slice(files, func(i, j int) bool { // rotated backups first, current file last
@@ -381,6 +435,14 @@ func (out *HistoryLog) add(e map[string]any, ts string) {
 		}
 	case "Failed to send message part to Matrix":
 		out.SendFailed++
+	case "Failed to get chat info", "Failed to create portal to handle event":
+		// Room creation failed. The bridge doesn't mark the chat as done, so
+		// it retries it first on every start (see history-settle).
+		if jid := str(e, "chat_jid"); jid != "" {
+			out.perChatCreateFail[jid]++
+		} else if portal != "" {
+			out.perChatCreateFail[portal]++
+		}
 	}
 	if isRateLimit(errText) || (level == "warn" && isRateLimit(msg)) {
 		out.RateLimited++
@@ -396,106 +458,436 @@ func (out *HistoryLog) add(e map[string]any, ts string) {
 	}
 }
 
-// history-catchup: lets the bridge finish chats whose history import stopped
-// early. Run it only while the bridge is stopped.
+// history-catchup: copies stored history the bridge hasn't put into tjena
+// yet. Run it only while the bridge is stopped.
 //
-//	librelay.so history-catchup <bridge.db>
+//	librelay.so history-catchup <bridge.db> [--mode missing|held|both]
+//	    [--login <login id>] [--chats jid,jid,...]
 //
-// It uses the bridge's own mechanism, nothing new: for each chat that has a
-// room but still has stored history, the "already created" mark on the
-// conversation is cleared, and the login's history_sync_portals_need_creating
-// flag is set again. On the next start the bridge re-runs "create portals
-// from history sync" for those chats. Their rooms exist, so it sends a chat
-// resync, and bridgev2 forward-fills every message newer than the last one in
-// the room from the stored history (up to backfill.max_catchup_messages).
-// Messages that are older than a message already in the room can't be put
-// in between afterwards; those stay missing.
+// Modes (--chats overrides them):
+//   - missing: chats that have a room but whose import stopped early (only
+//     those with stored messages newer than the room's newest message: older
+//     ones can't be put in between afterwards).
+//   - held: chats the phone sent history for that got no room yet (the
+//     bridge only creates rooms for the most recent chats at login).
+//
+// It uses the bridge's own mechanism, nothing new: the bridge re-runs
+// "create portals from history sync" for every conversation of a login
+// that isn't marked as synced, when the login's
+// history_sync_portals_need_creating flag is set. So the chosen chats get
+// their mark cleared, every other pending chat of that login is marked as
+// synced (so it isn't pulled in too), and the flag is set. Chats with a room
+// get a resync that forward-fills from the stored history (up to
+// backfill.max_catchup_messages); held-back chats get a new room filled with
+// up to backfill.max_initial_messages.
+//
+// The bridge creates at most network.history_sync.max_initial_conversations
+// rooms per run; history-catchup.json in the data dir lifts that limit for
+// the next start (see catchupActive).
+type CatchupOptions struct {
+	Mode  string   // "missing" (default), "held" or "both"
+	Login string   // only this login ("" = all)
+	Chats []string // exactly these chats (overrides Mode)
+}
+
 type CatchupResult struct {
-	Chats  int            `json:"chats"`
-	Stored int            `json:"stored"`
-	Logins map[string]int `json:"logins"`
+	Chats   int            `json:"chats"`
+	Stored  int            `json:"stored"`
+	Missing int            `json:"missing"` // chats with a room
+	Held    int            `json:"held"`    // chats that get a new room
+	Logins  map[string]int `json:"logins"`
+}
+
+const catchupFile = "history-catchup.json"
+
+// catchupActive: a catch-up was started recently, so the next bridge start
+// must not limit how many chats get created.
+func catchupActive(dataDir string) bool {
+	raw, err := os.ReadFile(filepath.Join(dataDir, catchupFile))
+	if err != nil {
+		return false
+	}
+	var f struct {
+		Until int64 `json:"until"`
+	}
+	return json.Unmarshal(raw, &f) == nil && time.Now().Unix() < f.Until
 }
 
 func runHistoryCatchup(args []string) error {
 	if len(args) < 1 {
-		return errors.New("usage: history-catchup <bridge.db>")
+		return errors.New("usage: history-catchup <bridge.db> [--mode missing|held|both] [--login ID] [--chats a,b]")
 	}
-	res, err := historyCatchup(args[0])
+	var o CatchupOptions
+	for i := 1; i < len(args); i++ {
+		if i+1 >= len(args) {
+			return fmt.Errorf("%s needs a value", args[i])
+		}
+		switch args[i] {
+		case "--mode":
+			o.Mode = args[i+1]
+		case "--login":
+			o.Login = args[i+1]
+		case "--chats":
+			for _, c := range strings.Split(args[i+1], ",") {
+				if c = strings.TrimSpace(c); c != "" {
+					o.Chats = append(o.Chats, c)
+				}
+			}
+		default:
+			return fmt.Errorf("unknown option %s", args[i])
+		}
+		i++
+	}
+	res, err := historyCatchup(args[0], o)
 	if err != nil {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(res)
 }
 
-func historyCatchup(dbPath string) (*CatchupResult, error) {
+type catchupConv struct {
+	login, jid string
+	synced     sql.NullInt64
+	stored     int
+	hasRoom    bool
+	fillable   int
+}
+
+// loadCatchupConvs reads every history conversation with what catch-up
+// needs to choose.
+func loadCatchupConvs(tx *sql.Tx) ([]catchupConv, error) {
+	rows, err := tx.Query(`SELECT hc.user_login_id, hc.chat_jid, hc.synced_login_ts,
+			(SELECT count(*) FROM whatsapp_history_sync_message hm
+				WHERE hm.user_login_id=hc.user_login_id AND hm.chat_jid=hc.chat_jid),
+			EXISTS (SELECT 1 FROM portal p JOIN user_portal up
+					ON up.portal_id=p.id AND up.portal_receiver=p.receiver
+				WHERE up.login_id=hc.user_login_id AND p.id=hc.chat_jid
+					AND p.mxid IS NOT NULL AND p.mxid<>'')
+		FROM whatsapp_history_sync_conversation hc`)
+	if err != nil {
+		return nil, fmt.Errorf("find chats: %w", err)
+	}
+	var out []catchupConv
+	for rows.Next() {
+		var c catchupConv
+		if err = rows.Scan(&c.login, &c.jid, &c.synced, &c.stored, &c.hasRoom); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	rows.Close()
+	for i := range out {
+		c := &out[i]
+		if !c.hasRoom || c.stored == 0 {
+			continue
+		}
+		// Only messages newer than the room's newest can still be added.
+		var newest sql.NullInt64
+		if tx.QueryRow(`SELECT max(timestamp) FROM message WHERE room_id=? AND room_receiver=?`, c.jid, c.login).Scan(&newest) != nil || !newest.Valid {
+			_ = tx.QueryRow(`SELECT max(timestamp) FROM message WHERE room_id=?`, c.jid).Scan(&newest)
+		}
+		since := int64(0)
+		if newest.Valid {
+			since = newest.Int64 / 1e9
+		}
+		if err := tx.QueryRow(`SELECT count(*) FROM whatsapp_history_sync_message
+				WHERE user_login_id=? AND chat_jid=? AND timestamp>?`, c.login, c.jid, since).Scan(&c.fillable); err != nil {
+			c.fillable = c.stored // no timestamps to compare: try all
+		}
+	}
+	return out, nil
+}
+
+func openWrite(dbPath string) (*sql.DB, *sql.Tx, error) {
 	if _, err := os.Stat(dbPath); err != nil {
-		return nil, fmt.Errorf("bridge database: %w", err)
+		return nil, nil, fmt.Errorf("bridge database: %w", err)
 	}
 	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000&_txlock=immediate")
+	if err != nil {
+		return nil, nil, err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		db.Close()
+		return nil, nil, err
+	}
+	return db, tx, nil
+}
+
+// loginMeta reads a login's metadata (logged_in_at and the rest, kept as is).
+func loginMeta(tx *sql.Tx, login string) (map[string]any, int64, error) {
+	var raw []byte
+	if err := tx.QueryRow(`SELECT metadata FROM user_login WHERE id=?`, login).Scan(&raw); err != nil {
+		return nil, 0, fmt.Errorf("read login: %w", err)
+	}
+	meta := map[string]any{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return nil, 0, fmt.Errorf("login metadata: %w", err)
+		}
+	}
+	ts, _ := meta["logged_in_at"].(float64)
+	return meta, int64(ts), nil
+}
+
+func saveLoginMeta(tx *sql.Tx, login string, meta map[string]any) error {
+	raw, _ := json.Marshal(meta)
+	_, err := tx.Exec(`UPDATE user_login SET metadata=? WHERE id=?`, string(raw), login)
+	return err
+}
+
+func historyCatchup(dbPath string, o CatchupOptions) (*CatchupResult, error) {
+	switch o.Mode {
+	case "":
+		o.Mode = "missing"
+	case "missing", "held", "both":
+	default:
+		return nil, fmt.Errorf("unknown mode %q", o.Mode)
+	}
+	db, tx, err := openWrite(dbPath)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
-	tx, err := db.Begin()
+	defer tx.Rollback()
+	convs, err := loadCatchupConvs(tx)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
-
-	type chat struct {
-		login, jid string
-		stored     int
+	want := map[string]bool{}
+	for _, c := range o.Chats {
+		want[c] = true
 	}
-	var chats []chat
-	rows, err := tx.Query(`SELECT hc.user_login_id, hc.chat_jid,
-			(SELECT count(*) FROM whatsapp_history_sync_message hm
-				WHERE hm.user_login_id=hc.user_login_id AND hm.chat_jid=hc.chat_jid) AS stored
-		FROM whatsapp_history_sync_conversation hc
-		WHERE EXISTS (SELECT 1 FROM portal p JOIN user_portal up
-				ON up.portal_id=p.id AND up.portal_receiver=p.receiver
-			WHERE up.login_id=hc.user_login_id AND p.id=hc.chat_jid
-				AND p.mxid IS NOT NULL AND p.mxid<>'')`)
-	if err != nil {
-		return nil, fmt.Errorf("find chats: %w", err)
-	}
-	for rows.Next() {
-		var c chat
-		if err = rows.Scan(&c.login, &c.jid, &c.stored); err != nil {
-			rows.Close()
-			return nil, err
+	chosen := func(c catchupConv) bool {
+		if o.Login != "" && c.login != o.Login {
+			return false
 		}
-		if c.stored > 0 {
-			chats = append(chats, c)
+		if len(want) > 0 {
+			// Only chats where something can still be added.
+			return want[c.jid] && ((c.hasRoom && c.fillable > 0) || (!c.hasRoom && c.stored > 0))
 		}
+		missing := c.hasRoom && c.fillable > 0
+		held := !c.hasRoom && c.stored > 0
+		switch o.Mode {
+		case "missing":
+			return missing
+		case "held":
+			return held
+		}
+		return missing || held
 	}
-	rows.Close()
-
 	res := &CatchupResult{Logins: map[string]int{}}
-	for _, c := range chats {
-		if _, err = tx.Exec(`UPDATE whatsapp_history_sync_conversation SET synced_login_ts=NULL
-			WHERE user_login_id=? AND chat_jid=?`, c.login, c.jid); err != nil {
-			return nil, fmt.Errorf("reset chat: %w", err)
+	for _, c := range convs {
+		if chosen(c) {
+			res.Chats++
+			res.Stored += c.stored
+			res.Logins[c.login]++
+			if c.hasRoom {
+				res.Missing++
+			} else {
+				res.Held++
+			}
 		}
-		res.Chats++
-		res.Stored += c.stored
-		res.Logins[c.login]++
+	}
+	if res.Chats == 0 {
+		return res, nil
 	}
 	for login := range res.Logins {
-		var raw []byte
-		if err = tx.QueryRow(`SELECT metadata FROM user_login WHERE id=?`, login).Scan(&raw); err != nil {
-			return nil, fmt.Errorf("read login: %w", err)
+		meta, loginTS, err := loginMeta(tx, login)
+		if err != nil {
+			return nil, err
 		}
-		meta := map[string]any{}
-		if len(raw) > 0 {
-			if err = json.Unmarshal(raw, &meta); err != nil {
-				return nil, fmt.Errorf("login metadata: %w", err)
+		for _, c := range convs {
+			if c.login != login {
+				continue
+			}
+			if chosen(c) {
+				_, err = tx.Exec(`UPDATE whatsapp_history_sync_conversation SET synced_login_ts=NULL
+					WHERE user_login_id=? AND chat_jid=?`, login, c.jid)
+			} else if !c.synced.Valid || c.synced.Int64 < loginTS {
+				// Pending but not chosen: mark as done so the bridge skips it.
+				_, err = tx.Exec(`UPDATE whatsapp_history_sync_conversation SET synced_login_ts=?
+					WHERE user_login_id=? AND chat_jid=?`, loginTS, login, c.jid)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("mark chat: %w", err)
 			}
 		}
 		meta["history_sync_portals_need_creating"] = true
-		raw, _ = json.Marshal(meta)
-		if _, err = tx.Exec(`UPDATE user_login SET metadata=? WHERE id=?`, string(raw), login); err != nil {
+		if err = saveLoginMeta(tx, login, meta); err != nil {
 			return nil, fmt.Errorf("update login: %w", err)
 		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	flag, _ := json.Marshal(map[string]any{"until": time.Now().Add(6 * time.Hour).Unix(), "chats": res.Chats})
+	_ = os.WriteFile(filepath.Join(filepath.Dir(dbPath), catchupFile), flag, 0o600)
+	return res, nil
+}
+
+// history-stop: stops the bridge from creating and filling more chats from
+// history (bridge stopped). Every pending chat is marked as synced and the
+// logins' "portals need creating" flag is cleared. Stored messages stay, so
+// they can be copied later with history-catchup.
+//
+//	librelay.so history-stop <bridge.db>
+type StopResult struct {
+	Stopped int `json:"stopped"` // chats that were still waiting
+}
+
+func runHistoryStop(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: history-stop <bridge.db>")
+	}
+	res, err := historyStop(args[0])
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(res)
+}
+
+func historyStop(dbPath string) (*StopResult, error) {
+	db, tx, err := openWrite(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	defer tx.Rollback()
+	var logins []string
+	rows, err := tx.Query(`SELECT id FROM user_login`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			logins = append(logins, id)
+		}
+	}
+	rows.Close()
+	res := &StopResult{}
+	for _, login := range logins {
+		meta, loginTS, err := loginMeta(tx, login)
+		if err != nil {
+			return nil, err
+		}
+		r, err := tx.Exec(`UPDATE whatsapp_history_sync_conversation SET synced_login_ts=?
+			WHERE user_login_id=? AND (synced_login_ts IS NULL OR synced_login_ts<?)`, loginTS, login, loginTS)
+		if err != nil {
+			return nil, fmt.Errorf("mark chats: %w", err)
+		}
+		n, _ := r.RowsAffected()
+		res.Stopped += int(n)
+		meta["history_sync_portals_need_creating"] = false
+		if err = saveLoginMeta(tx, login, meta); err != nil {
+			return nil, fmt.Errorf("update login: %w", err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(filepath.Join(filepath.Dir(dbPath), catchupFile))
+	return res, nil
+}
+
+// history-settle: run before every bridge start (bridge stopped). Takes chats
+// out of the bridge's "create from history" queue whose room creation keeps
+// failing (for example WhatsApp refuses their chat info).
+//
+//	librelay.so history-settle <bridge.db> <log_dir>
+//
+// Why: the bridge only marks a chat as done when its room was created. A chat
+// that fails stays first in line (the queue is the newest chats, at most
+// max_initial_conversations per start) and is retried on every start, so the
+// chats behind it never get their turn. The bridge also never records that
+// the import finished. Marking such a chat as done ends that: the next start
+// moves on to the other chats. Its stored messages stay, and a new message in
+// that chat still creates its room as usual.
+type SettleResult struct {
+	Settled []string `json:"settled"` // chats taken out of the queue
+}
+
+func runHistorySettle(args []string) error {
+	if len(args) < 2 {
+		return errors.New("usage: history-settle <bridge.db> <log_dir>")
+	}
+	res, err := historySettle(args[0], args[1])
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(res)
+}
+
+func historySettle(dbPath, logDir string) (*SettleResult, error) {
+	res := &SettleResult{Settled: []string{}}
+	if _, err := os.Stat(dbPath); err != nil {
+		return res, nil // not set up yet
+	}
+	db, tx, err := openWrite(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	defer tx.Rollback()
+	type pend struct {
+		login, jid string
+		loginTS    int64
+	}
+	var logins []string
+	rows, err := tx.Query(`SELECT id FROM user_login`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			logins = append(logins, id)
+		}
+	}
+	rows.Close()
+	var since time.Time
+	var pending []pend
+	for _, login := range logins {
+		_, loginTS, err := loginMeta(tx, login)
+		if err != nil {
+			return nil, err
+		}
+		if t := time.Unix(loginTS, 0); loginTS > 0 && (since.IsZero() || t.Before(since)) {
+			since = t
+		}
+		rows, err := tx.Query(`SELECT hc.chat_jid FROM whatsapp_history_sync_conversation hc
+			WHERE hc.user_login_id=? AND (hc.synced_login_ts IS NULL OR hc.synced_login_ts<?)
+				AND NOT EXISTS (SELECT 1 FROM portal p WHERE p.id=hc.chat_jid AND p.mxid IS NOT NULL AND p.mxid<>'')`,
+			login, loginTS)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var jid string
+			if rows.Scan(&jid) == nil {
+				pending = append(pending, pend{login, jid, loginTS})
+			}
+		}
+		rows.Close()
+	}
+	if len(pending) == 0 {
+		return res, nil
+	}
+	fails := readHistoryLog(logDir, since).perChatCreateFail
+	for _, p := range pending {
+		if fails[p.jid] < createFailLimit {
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE whatsapp_history_sync_conversation SET synced_login_ts=?
+			WHERE user_login_id=? AND chat_jid=?`, p.loginTS, p.login, p.jid); err != nil {
+			return nil, fmt.Errorf("mark chat: %w", err)
+		}
+		res.Settled = append(res.Settled, p.jid)
+	}
+	if len(res.Settled) == 0 {
+		return res, nil
 	}
 	return res, tx.Commit()
 }

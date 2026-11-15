@@ -24,6 +24,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
   bool _onlyProblems = false;
   bool _loading = false;
   bool _catchingUp = false;
+  bool _stopping = false;
+  int _tab = 0;
+  bool _selecting = false;
+  final Set<String> _selected = {};
   Map<String, dynamic> _pace = {};
   String _appVersion = '';
   Map<String, dynamic> _dp = {};
@@ -132,15 +136,71 @@ class _HistoryScreenState extends State<HistoryScreen> {
     _load();
   }
 
-  Future<void> _catchup() async {
+  Map<String, dynamic>? get _login =>
+      _logins.isEmpty ? null : _logins[_tab.clamp(0, _logins.length - 1)];
+
+  List<Map<String, dynamic>> _chatsOf(Map<String, dynamic>? login) =>
+      ((login?['chats'] as List?) ?? [])
+          .cast<Map>()
+          .map((c) => c.cast<String, dynamic>())
+          .toList();
+
+  /// The relay's verdict for a chat: "ok", "fixable", "unfixable", "held"
+  /// or "" (see relay history.go, HistoryChat.State).
+  static String _state(Map<String, dynamic> c) {
+    final s = c['state'] as String?;
+    if (s != null) return s;
+    // Older relay without states.
+    final stored = ((c['stored'] as num?) ?? 0).toInt();
+    final fill = ((c['fillable'] as num?) ?? 0).toInt();
+    if (c['has_room'] == true) {
+      return stored == 0 ? 'ok' : (fill > 0 ? 'fixable' : 'unfixable');
+    }
+    return stored > 0 ? 'held' : '';
+  }
+
+  /// A room exists and stored messages can still be added at its end.
+  static bool _isMissing(Map<String, dynamic> c) => _state(c) == 'fixable';
+
+  /// Missing messages can't be added any more (or the chat can't be created).
+  static bool _isUnfixable(Map<String, dynamic> c) => _state(c) == 'unfixable';
+
+  /// The phone sent history, but the chat got no room (not among the first chats).
+  static bool _isHeld(Map<String, dynamic> c) => _state(c) == 'held';
+
+  static bool _selectable(Map<String, dynamic> c) =>
+      _isMissing(c) || _isHeld(c);
+
+  String _loginName(Map<String, dynamic> l) {
+    final n = (l['name'] as String?) ?? '';
+    return n.isNotEmpty ? n : '${l['id']}';
+  }
+
+  /// [mode]: "missing" or "held"; or exactly [chats].
+  Future<void> _catchup({String? mode, List<String>? chats}) async {
+    final login = _login;
+    final account = login == null || _logins.length < 2
+        ? ''
+        : ' of ${_loginName(login)}';
+    final what = chats != null
+        ? '${chats.length} chosen chats$account'
+        : mode == 'held'
+        ? 'the chats$account that were held back (only the most recent chats were created at login)'
+        : 'the missing messages at the end of the chats$account where the import stopped early';
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
-        title: const Text('Copy missing messages?'),
-        content: const Text(
-          'The bridge restarts and copies the stored messages that are missing at the end of the '
-          'chats listed here. Your own messages go at the speed tjena allows, so this can take a while; '
-          'keep the bridge running.\n\n'
+        title: Text(
+          chats != null
+              ? 'Copy chosen chats?'
+              : mode == 'held'
+              ? 'Copy held-back chats?'
+              : 'Copy missing messages?',
+        ),
+        content: Text(
+          'The bridge restarts and copies $what. Nothing else is copied. '
+          'Your own messages go at the speed tjena allows, so this can take a while; '
+          'keep the bridge running. You can stop it any time with "Stop copying".\n\n'
           'Messages can only be added after the newest message already in a chat. If someone wrote '
           'in a chat after the import stopped, the gap before that message stays.',
         ),
@@ -160,16 +220,27 @@ class _HistoryScreenState extends State<HistoryScreen> {
     setState(() => _catchingUp = true);
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final r = await Native.historyCatchup();
+      final r = await Native.historyCatchup(
+        mode: chats == null ? mode : null,
+        login: _logins.length > 1 ? (login?['id'] as String?) : null,
+        chats: chats,
+      );
+      final n = (r['chats'] as num? ?? 0).toInt();
       messenger.showSnackBar(
         SnackBar(
           content: Text(
-            (r['chats'] as num? ?? 0) == 0
+            n == 0
                 ? 'Nothing to copy.'
-                : 'Copying ${r['stored']} messages in ${r['chats']} chats. This screen shows the progress.',
+                : 'Copying ${r['stored']} messages in $n chats. This screen shows the progress.',
           ),
         ),
       );
+      if (mounted) {
+        setState(() {
+          _selecting = false;
+          _selected.clear();
+        });
+      }
     } catch (e) {
       messenger.showSnackBar(
         SnackBar(
@@ -183,10 +254,106 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
   }
 
+  Future<void> _stop() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Stop copying?'),
+        content: const Text(
+          'The bridge restarts and stops creating and filling chats from history, for all accounts. '
+          'Chats already copied stay. What wasn\'t copied stays stored on this phone: you can copy it '
+          'later with the buttons here. New messages keep arriving as usual.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Stop'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _stopping = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final r = await Native.historyStop();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            'Stopped. ${r['stopped'] ?? 0} chats were still waiting; they can be copied later.',
+          ),
+        ),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Failed: ${e is PlatformException ? e.message : e}'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _stopping = false);
+      await Future.delayed(const Duration(seconds: 3));
+      _load();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final logins = _logins;
+    if (_tab >= logins.length) _tab = 0;
+    return DefaultTabController(
+      key: ValueKey(logins.map((l) => l['id']).join(',')),
+      length: logins.length > 1 ? logins.length : 1,
+      initialIndex: logins.length > 1 ? _tab : 0,
+      child: _scaffold(context, logins),
+    );
+  }
+
+  Widget _scaffold(BuildContext context, List<Map<String, dynamic>> logins) {
+    final selectedCount = _selected.length;
     return Scaffold(
+      bottomNavigationBar: _selecting
+          ? SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    TextButton(
+                      onPressed: () => setState(() {
+                        _selecting = false;
+                        _selected.clear();
+                      }),
+                      child: const Text('Cancel'),
+                    ),
+                    const Spacer(),
+                    FilledButton.icon(
+                      onPressed: selectedCount == 0 || _catchingUp
+                          ? null
+                          : () => _catchup(chats: _selected.toList()),
+                      icon: const Icon(Icons.download),
+                      label: Text('Copy $selectedCount chats'),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          : null,
       appBar: AppBar(
+        bottom: logins.length > 1
+            ? TabBar(
+                isScrollable: logins.length > 2,
+                onTap: (i) => setState(() {
+                  _tab = i;
+                  _selecting = false;
+                  _selected.clear();
+                }),
+                tabs: [for (final l in logins) Tab(text: _loginName(l))],
+              )
+            : null,
         title: Text(
           _appVersion.isEmpty
               ? 'History import'
@@ -237,14 +404,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
     final creating = log['rooms_creating'] == true;
     final copiedChats = (log['backfill_chats'] as num?)?.toInt() ?? 0;
     final notCopied = _sum('not_copied');
-    final failedChats = _logins
-        .expand((l) => (l['chats'] as List).cast<Map>())
-        .where(
-          (c) =>
-              c['failed'] == true ||
-              (c['has_room'] == true && ((c['stored'] as num?) ?? 0) > 0),
-        )
-        .length;
     final rateLimited = (log['rate_limited'] as num?)?.toInt() ?? 0;
     final errors = ((log['recent_errors'] as List?) ?? []).cast<Map>();
     final waiting = (_pace['sends_waiting'] as num?)?.toInt() ?? 0;
@@ -384,62 +543,33 @@ class _HistoryScreenState extends State<HistoryScreen> {
               ),
             ),
           ),
-        if (failedChats > 0 || notCopied > 0)
+        if (_running)
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: WarningCard(
-              title:
-                  '$failedChats chats stopped early · $notCopied messages not copied',
-              text: rateLimited > 0
-                  ? 'tjena refused messages for sending too fast ($rateLimited times), and the bridge skipped '
-                        'the rest of those chats. The messages are still stored on this phone. '
-                        '"Copy missing messages" restarts the bridge and copies them, slowly, at the speed tjena allows.'
-                  : 'Copying stopped with an error in these chats; the rest of their history was skipped. '
-                        'See "Errors" below. "Copy missing messages" tries these chats again.',
-            ),
-          ),
-        if (failedChats > 0 || notCopied > 0)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: Text(
-              '${_sum('fillable')} of $notCopied can still be added at the end of their chats. '
-              '${_sum('blocked_chats')} chats got newer messages after the import stopped, so their '
-              'missing messages would land before those and can\'t be added any more.',
-              style: t.textTheme.bodyMedium,
-            ),
-          ),
-        if (failedChats > 0 || notCopied > 0) ...[
-          if (_runningWhy != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-              child: Text(
-                'Import may still be running: $_runningWhy. You can wait, or start copying now '
-                '(the bridge restarts and continues from where it is).',
-                style: t.textTheme.bodySmall,
-              ),
-            ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-            child: FilledButton.icon(
-              onPressed: _catchingUp ? null : _catchup,
-              icon: _catchingUp
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: OutlinedButton.icon(
+              onPressed: _stopping ? null : _stop,
+              icon: _stopping
                   ? const SizedBox(
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
-                  : const Icon(Icons.replay),
-              label: const Text('Copy missing messages'),
+                  : const Icon(Icons.stop_circle_outlined),
+              label: const Text('Stop copying'),
             ),
           ),
-        ],
+        ..._accountSection(context, rateLimited),
         const SectionTitle('Numbers'),
         _Num('Messages stored from your phone', '${log['saved'] ?? 0}'),
         _Num('Messages copied into chats', '${_sum('bridged_messages')}'),
         _Num(
-          'Not copied (chat already created)',
-          '$notCopied',
-          bad: notCopied > 0,
+          'Not copied, can still be added',
+          '${_sum('fillable')}',
+          bad: _sum('fillable') > 0,
+        ),
+        _Num(
+          'Not copied, can\'t be added any more',
+          '${notCopied - _sum('fillable')}',
         ),
         _Num(
           'Waiting for a chat (not in the first chats)',
@@ -473,7 +603,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
           value: _onlyProblems,
           onChanged: (v) => setState(() => _onlyProblems = v),
         ),
-        for (final l in _logins) ..._chatTiles(context, l),
+        if (_login != null) ..._chatTiles(context, _login!),
         if (errors.isNotEmpty) ...[
           const SectionTitle('Errors'),
           for (final e in errors.reversed.take(20))
@@ -501,49 +631,174 @@ class _HistoryScreenState extends State<HistoryScreen> {
     );
   }
 
-  List<Widget> _chatTiles(BuildContext context, Map<String, dynamic> login) {
+  /// Warnings and copy actions for the account of the open tab.
+  List<Widget> _accountSection(BuildContext context, int rateLimited) {
     final t = Theme.of(context);
-    final chats = (login['chats'] as List)
-        .cast<Map>()
-        .map((c) => c.cast<String, dynamic>())
-        .where((c) {
-          final problem =
-              c['failed'] == true ||
-              (c['has_room'] == true && ((c['stored'] as num?) ?? 0) > 0);
-          return !_onlyProblems || problem;
-        })
+    final login = _login;
+    if (login == null) return const [];
+    final chats = _chatsOf(login);
+    final missing = chats.where(_isMissing).toList();
+    final held = chats.where(_isHeld).toList();
+    final unfixable = chats.where(_isUnfixable).toList();
+    final busy = _catchingUp || _stopping;
+    int sum(List<Map<String, dynamic>> l, String k) =>
+        l.fold(0, (a, c) => a + ((c[k] as num?)?.toInt() ?? 0));
+    final lateChats = unfixable
+        .where((c) => c['reason'] != 'create_failed')
         .toList();
+    final notCreated = unfixable.length - lateChats.length;
     return [
-      if (_logins.length > 1)
+      if (missing.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: WarningCard(
+            title:
+                '${missing.length} chats stopped early · ${sum(missing, 'fillable')} messages can still be added',
+            text:
+                '${rateLimited > 0 ? 'tjena refused messages for sending too fast ($rateLimited times), and the '
+                          'bridge skipped the rest of those chats.' : 'Copying stopped with an error in these chats '
+                          '(see "Errors" below).'} '
+                'The messages are still stored on this phone: use "Copy missing messages".',
+          ),
+        ),
+      if (unfixable.isNotEmpty)
+        Card(
+          margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+          child: ListTile(
+            leading: Icon(Icons.block, color: t.colorScheme.outline),
+            title: Text(
+              '${unfixable.length} chats can\'t be completed · ${sum(lateChats, 'stored')} messages',
+            ),
+            subtitle: Text(
+              [
+                if (lateChats.isNotEmpty)
+                  '${lateChats.length} got newer messages after the import stopped; the missing ones '
+                      'would land before those, so they can\'t be added any more.',
+                if (notCreated > 0)
+                  '$notCreated could not be created by the bridge (WhatsApp refused them several times). '
+                      'They no longer hold up other chats; a new message there creates the chat as usual.',
+                'Nothing to do: they don\'t block other chats.',
+              ].join(' '),
+            ),
+          ),
+        ),
+      if (_runningWhy != null && (missing.isNotEmpty || held.isNotEmpty))
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-          child: Text('${login['name']}', style: t.textTheme.labelLarge),
-        ),
-      if (chats.isEmpty) const ListTile(dense: true, title: Text('No chats')),
-      for (final c in chats)
-        ListTile(
-          dense: true,
-          leading: _chatIcon(context, c),
-          title: Text(
-            (c['name'] as String?)?.isNotEmpty == true
-                ? c['name'] as String
-                : _short(c['jid'] as String),
+          child: Text(
+            'Import may still be running: $_runningWhy. Copying now restarts the bridge and copies '
+            'only what you choose; other waiting chats are skipped.',
+            style: t.textTheme.bodySmall,
           ),
-          subtitle: Text(_chatText(c)),
         ),
+      const SectionTitle('Copy history'),
+      ListTile(
+        leading: const Icon(Icons.replay),
+        title: const Text('Copy missing messages'),
+        subtitle: Text(
+          missing.isEmpty
+              ? 'Nothing missing at the end of your chats.'
+              : '${sum(missing, 'fillable')} messages in ${missing.length} chats that stopped early',
+        ),
+        enabled: missing.isNotEmpty && !busy,
+        onTap: () => _catchup(mode: 'missing'),
+      ),
+      ListTile(
+        leading: const Icon(Icons.playlist_add),
+        title: const Text('Copy held-back chats'),
+        subtitle: Text(
+          held.isEmpty
+              ? 'No held-back chats.'
+              : '${held.length} chats (${sum(held, 'stored')} messages) that weren\'t among the first chats '
+                    'created at login',
+        ),
+        enabled: held.isNotEmpty && !busy,
+        onTap: () => _catchup(mode: 'held'),
+      ),
+      ListTile(
+        leading: const Icon(Icons.checklist),
+        title: const Text('Choose chats…'),
+        subtitle: const Text(
+          'Pick chats in the list below, then "Copy" at the bottom',
+        ),
+        enabled: (missing.isNotEmpty || held.isNotEmpty) && !busy,
+        onTap: () => setState(() {
+          _selecting = true;
+          _onlyProblems = false;
+        }),
+      ),
     ];
   }
 
+  List<Widget> _chatTiles(BuildContext context, Map<String, dynamic> login) {
+    final chats = _chatsOf(login).where((c) {
+      if (_selecting) return _selectable(c);
+      final problem = _isMissing(c) || _isUnfixable(c);
+      return !_onlyProblems || problem;
+    }).toList();
+    return [
+      if (_selecting)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Chats that can be copied (${chats.length})',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+              TextButton(
+                onPressed: () => setState(() {
+                  final all = chats.map((c) => c['jid'] as String).toSet();
+                  if (_selected.containsAll(all)) {
+                    _selected.removeAll(all);
+                  } else {
+                    _selected.addAll(all);
+                  }
+                }),
+                child: const Text('All / none'),
+              ),
+            ],
+          ),
+        ),
+      if (chats.isEmpty) const ListTile(dense: true, title: Text('No chats')),
+      for (final c in chats)
+        _selecting
+            ? CheckboxListTile(
+                dense: true,
+                value: _selected.contains(c['jid']),
+                onChanged: (v) => setState(() {
+                  final jid = c['jid'] as String;
+                  v == true ? _selected.add(jid) : _selected.remove(jid);
+                }),
+                title: Text(_chatName(c)),
+                subtitle: Text(_chatText(c)),
+              )
+            : ListTile(
+                dense: true,
+                leading: _chatIcon(context, c),
+                title: Text(_chatName(c)),
+                subtitle: Text(_chatText(c)),
+              ),
+    ];
+  }
+
+  String _chatName(Map<String, dynamic> c) =>
+      (c['name'] as String?)?.isNotEmpty == true
+      ? c['name'] as String
+      : _short(c['jid'] as String);
+
+  /// Fixable: orange "repair" symbol. Can't be fixed: grey "blocked"
+  /// symbol (nothing to do). Otherwise done or waiting.
   Widget _chatIcon(BuildContext context, Map<String, dynamic> c) {
-    final stored = ((c['stored'] as num?) ?? 0).toInt();
-    if (c['failed'] == true || (c['has_room'] == true && stored > 0)) {
-      return Icon(
-        Icons.warning_amber_rounded,
-        color: Theme.of(context).colorScheme.error,
-      );
-    }
-    if (c['has_room'] == true) {
-      return const Icon(Icons.check_circle_outline, color: Colors.green);
+    switch (_state(c)) {
+      case 'fixable':
+        return const Icon(Icons.build_circle_outlined, color: Colors.orange);
+      case 'unfixable':
+        return Icon(Icons.block, color: Theme.of(context).colorScheme.outline);
+      case 'ok':
+        return const Icon(Icons.check_circle_outline, color: Colors.green);
     }
     return const Icon(Icons.schedule, color: Colors.grey);
   }
@@ -553,16 +808,26 @@ class _HistoryScreenState extends State<HistoryScreen> {
     final parts = <String>[];
     if (c['has_room'] == true) {
       parts.add('${c['bridged']} in chat');
-      if (stored > 0) parts.add('$stored not copied');
+      if (stored > 0) {
+        final fill = ((c['fillable'] as num?) ?? 0).toInt();
+        parts.add(
+          fill > 0
+              ? '$stored not copied ($fill can be added)'
+              : '$stored not copied (can\'t be added any more)',
+        );
+      }
       if (c['rate_limit'] == true) {
         parts.add('stopped: rate limit');
       } else if (c['failed'] == true) {
         parts.add('stopped: error');
       }
     } else {
+      final tries = ((c['create_failed'] as num?) ?? 0).toInt();
       parts.add(
-        stored > 0
-            ? 'no chat yet · $stored stored, copied when a new message arrives'
+        _isUnfixable(c)
+            ? 'can\'t be created (failed $tries times) · $stored stored · created when a new message arrives'
+            : stored > 0
+            ? 'held back · $stored stored, copied when a new message arrives or with "Copy held-back chats"'
             : 'no chat yet',
       );
     }

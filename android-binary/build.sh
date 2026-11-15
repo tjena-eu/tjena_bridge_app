@@ -10,7 +10,7 @@
 #        API           min Android API level (default 29 = Android 10)
 set -euo pipefail
 
-PINNED_TAG="v0.2610.0"
+PINNED_TAG="v0.2610.0" # also MAUTRIX_TAG in docker/Dockerfile
 TAG="${1:-$PINNED_TAG}"
 API="${API:-29}"
 HERE="$(cd "$(dirname "$0")" && pwd)"

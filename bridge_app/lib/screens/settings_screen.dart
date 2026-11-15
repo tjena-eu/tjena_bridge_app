@@ -6,6 +6,7 @@ import '../native.dart';
 import 'calls_screen.dart';
 import 'options_screen.dart';
 import 'history_screen.dart';
+import 'move_screen.dart';
 import 'names_screen.dart';
 import 'security_screen.dart';
 import 'widgets.dart';
@@ -225,6 +226,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onTap: _busy ? null : () => _guard(() async => Native.stop()),
         ),
         ListTile(
+          leading: const Icon(Icons.phonelink_ring),
+          title: const Text('Move to a new phone'),
+          subtitle: const Text('Chats, WhatsApp link and keys go to the new phone; nothing to set up again'),
+          onTap: _busy ? null : () => _open(MoveOutScreen(state: s, refresh: widget.refresh)),
+        ),
+        ListTile(
           leading: const Icon(Icons.phonelink_setup),
           title: const Text('Make this phone the active bridge'),
           subtitle: const Text('Use after another phone took over, or after restoring a backup'),
@@ -235,6 +242,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           title: const Text('Export log'),
           subtitle: const Text('Tokens, phone numbers and message text are removed'),
           onTap: _busy ? null : _exportLogs,
+        ),
+        ListTile(
+          leading: const Icon(Icons.info_outline),
+          title: const Text('About & licences'),
+          subtitle: Text('tjena Bridge ${s.appVersion} · AGPL-3.0-or-later'),
+          onTap: () => showLicensePage(
+            context: context,
+            applicationName: 'tjena Bridge',
+            applicationVersion: s.appVersion,
+            applicationLegalese: 'Free software under the GNU Affero General Public License, version 3 or later.',
+          ),
         ),
         const SectionTitle('Danger zone'),
         ListTile(

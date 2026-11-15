@@ -68,8 +68,12 @@ type videoState struct {
 	lastPLI     time.Time
 	peerVideo   bool
 	orientation int
-	held        [][]byte
-	lastFrame   time.Time
+	// rtpOrient: the frames carry their own rotation (RTP CVO). That one is
+	// right; the video-state stanza's device_orientation uses another
+	// convention (on Android portrait it is the inverse: upside down).
+	rtpOrient bool
+	held      [][]byte
+	lastFrame time.Time
 }
 
 // askAppKeyframe asks tjena's encoder for a keyframe (WhatsApp drops video
@@ -183,7 +187,12 @@ func (v videoToApp) WriteVideo(au []byte) error {
 func (v videoToApp) Close() error { return nil }
 
 // SetOrientation: rotation from the frame metadata (quarter turns clockwise).
-func (v videoToApp) SetOrientation(o int) { v.m.setPeerVideo(v.s, true, o) }
+func (v videoToApp) SetOrientation(o int) {
+	v.s.v.mu.Lock()
+	v.s.v.rtpOrient = true
+	v.s.v.mu.Unlock()
+	v.m.setPeerVideo(v.s, true, o)
+}
 
 var _ meowcaller.VideoOrientationSink = videoToApp{}
 
@@ -236,7 +245,13 @@ func (m *Manager) watchVideo(s *session, c *meowcaller.Call) {
 			m.send(Msg{Type: "video_state", To: s.app, ID: s.id, Upgrade: "accepted"})
 			s.askAppKeyframeSoon()
 		case signaling.VideoStateEnabled:
-			m.setPeerVideo(s, true, v.Orientation)
+			o := v.Orientation
+			s.v.mu.Lock()
+			if s.v.rtpOrient {
+				o = -1 // the frames' own rotation wins
+			}
+			s.v.mu.Unlock()
+			m.setPeerVideo(s, true, o)
 			s.askAppKeyframe()
 		case signaling.VideoStateDisabled, signaling.VideoStateStopped:
 			m.setPeerVideo(s, false, -1)

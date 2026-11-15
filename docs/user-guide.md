@@ -18,11 +18,11 @@ at home on Wi-Fi and a charger, plus your tjena app.
 2. **In tjena (your normal phone):** Settings → Bridges →
    *WhatsApp: which bridge?* → **Set up**. Enter your tjena password. tjena
    shows a QR code that is valid for 5 minutes and works once.
-3. **In tjena Bridge:** confirm the risk note, tap **Sign in with tjena (scan
-   QR)** and scan the code. The bridge app signs in as its own session
+3. **In tjena Bridge:** confirm the risk note, tap **Scan the QR code from
+   tjena** and scan the code. The bridge app signs in as its own session
    ("WhatsApp bridge (home)"), gets your personal bridge from the server and
-   starts it. If tjena can't show a QR code, sign in with your username and
-   password in the bridge app instead.
+   starts it. Without a camera (or if tjena can't show a QR code) tap **Sign
+   in with username and password** instead.
 4. **Battery:** on the Status tab, tap **Fix** next to "Battery optimisation"
    and allow tjena Bridge to run unrestricted. Otherwise Android may stop it.
 5. **Link WhatsApp:** tjena Bridge → WhatsApp tab → enter your number → **Get
@@ -103,8 +103,15 @@ the bridge checks out.
 
 ## Moving to a new phone
 
+- **Move (recommended):** on the old phone, Settings → **Move to a new
+  phone**. On the new phone, install tjena Bridge, sign in with the same tjena
+  account and choose **Move from my old phone**. Then either scan the old
+  phone's code, or tap **Connect without a code** (no camera needed): both
+  phones show a 6-digit number; if it is the same, confirm on both. Chats,
+  the WhatsApp link and the keys move over end-to-end encrypted, and the old
+  phone removes its copy. Works the same with a Docker bridge.
 - **With a backup:** on the old phone, Backup → Export. On the new phone,
-  install tjena Bridge → Advanced → Restore from a backup. The old phone stops
+  install tjena Bridge → **Restore from a backup file**. The old phone stops
   automatically when the new one connects.
 - **Without a backup:** set up again from tjena (Set up → scan) on the new
   phone and link WhatsApp again. The old phone is cut off. Older bridged
